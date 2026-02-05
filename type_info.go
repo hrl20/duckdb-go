@@ -118,6 +118,8 @@ type baseTypeInfo struct {
 	arrayLength   mapping.IdxT
 	// The internal type for ENUM and DECIMAL values.
 	internalType Type
+	// alias is the type alias (e.g., "JSON" for VARCHAR with JSON alias).
+	alias string
 }
 
 type vectorTypeInfo struct {
@@ -144,11 +146,20 @@ type TypeInfo interface {
 	// Returns nil for simple/primitive types.
 	// Use type assertion to access specific detail types.
 	Details() TypeDetails
+	// Alias returns the type alias (e.g., "JSON" for VARCHAR with JSON alias).
+	// Returns an empty string if no alias is set.
+	Alias() string
 	logicalType() mapping.LogicalType
 }
 
 func (info *typeInfo) InternalType() Type {
 	return info.Type
+}
+
+// Alias returns the type alias (e.g., "JSON" for VARCHAR with JSON alias).
+// Returns an empty string if no alias is set.
+func (info *typeInfo) Alias() string {
+	return info.alias
 }
 
 // Details returns type-specific details for complex types.
@@ -414,28 +425,32 @@ func NewUnionInfo(memberTypes []TypeInfo, memberNames []string) (TypeInfo, error
 }
 
 func (info *typeInfo) logicalType() mapping.LogicalType {
+	var lt mapping.LogicalType
 	switch info.Type {
 	case TYPE_BOOLEAN, TYPE_TINYINT, TYPE_SMALLINT, TYPE_INTEGER, TYPE_BIGINT, TYPE_UTINYINT, TYPE_USMALLINT,
 		TYPE_UINTEGER, TYPE_UBIGINT, TYPE_FLOAT, TYPE_DOUBLE, TYPE_TIMESTAMP, TYPE_TIMESTAMP_S, TYPE_TIMESTAMP_MS,
 		TYPE_TIMESTAMP_NS, TYPE_TIMESTAMP_TZ, TYPE_DATE, TYPE_TIME, TYPE_TIME_TZ, TYPE_INTERVAL, TYPE_HUGEINT,
 		TYPE_UHUGEINT, TYPE_VARCHAR, TYPE_BLOB, TYPE_UUID, TYPE_ANY:
-		return mapping.CreateLogicalType(info.Type)
+		lt = mapping.CreateLogicalType(info.Type)
 	case TYPE_DECIMAL:
-		return mapping.CreateDecimalType(info.decimalWidth, info.decimalScale)
+		lt = mapping.CreateDecimalType(info.decimalWidth, info.decimalScale)
 	case TYPE_ENUM:
-		return mapping.CreateEnumType(info.names)
+		lt = mapping.CreateEnumType(info.names)
 	case TYPE_LIST:
-		return info.logicalListType()
+		lt = info.logicalListType()
 	case TYPE_STRUCT:
-		return info.logicalStructType()
+		lt = info.logicalStructType()
 	case TYPE_MAP:
-		return info.logicalMapType()
+		lt = info.logicalMapType()
 	case TYPE_ARRAY:
-		return info.logicalArrayType()
+		lt = info.logicalArrayType()
 	case TYPE_UNION:
-		return info.logicalUnionType()
+		lt = info.logicalUnionType()
 	}
-	return mapping.LogicalType{}
+	if info.alias != "" {
+		mapping.LogicalTypeSetAlias(lt, info.alias)
+	}
+	return lt
 }
 
 func (info *typeInfo) logicalListType() mapping.LogicalType {
@@ -485,26 +500,35 @@ func (info *typeInfo) logicalUnionType() mapping.LogicalType {
 // The returned TypeInfo does not hold a reference to the LogicalType.
 func newTypeInfoFromLogicalType(lt mapping.LogicalType) (TypeInfo, error) {
 	t := mapping.GetTypeId(lt)
+	alias := mapping.LogicalTypeGetAlias(lt)
+
+	var info TypeInfo
+	var err error
 
 	switch t {
 	case TYPE_DECIMAL:
-		return newDecimalInfoFromLogicalType(lt)
+		info, err = newDecimalInfoFromLogicalType(lt)
 	case TYPE_ENUM:
-		return newEnumInfoFromLogicalType(lt)
+		info, err = newEnumInfoFromLogicalType(lt)
 	case TYPE_LIST:
-		return newListInfoFromLogicalType(lt)
+		info, err = newListInfoFromLogicalType(lt)
 	case TYPE_ARRAY:
-		return newArrayInfoFromLogicalType(lt)
+		info, err = newArrayInfoFromLogicalType(lt)
 	case TYPE_MAP:
-		return newMapInfoFromLogicalType(lt)
+		info, err = newMapInfoFromLogicalType(lt)
 	case TYPE_STRUCT:
-		return newStructInfoFromLogicalType(lt)
+		info, err = newStructInfoFromLogicalType(lt)
 	case TYPE_UNION:
-		return newUnionInfoFromLogicalType(lt)
+		info, err = newUnionInfoFromLogicalType(lt)
 	default:
-		// Simple/primitive type
-		return NewTypeInfo(t)
+		info, err = NewTypeInfo(t)
 	}
+
+	if err != nil {
+		return nil, err
+	}
+	info.(*typeInfo).alias = alias
+	return info, nil
 }
 
 func newDecimalInfoFromLogicalType(lt mapping.LogicalType) (TypeInfo, error) {

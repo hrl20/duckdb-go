@@ -1,6 +1,7 @@
 package duckdb
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -593,6 +594,104 @@ func TestNewTypeInfoFromLogicalTypeNested(t *testing.T) {
 	require.Equal(t, "id", structDetails.Entries[0].Name())
 	require.Equal(t, TYPE_VARCHAR, structDetails.Entries[1].Info().InternalType())
 	require.Equal(t, "name", structDetails.Entries[1].Name())
+}
+
+func TestTypeInfoJSONAlias(t *testing.T) {
+	db := openDbWrapper(t, "")
+	defer closeDbWrapper(t, db)
+
+	t.Run("JSON", func(t *testing.T) {
+		// Query a JSON value and verify the alias is captured.
+		rows, err := db.Query(`SELECT '{"key":"value"}'::JSON`)
+		require.NoError(t, err)
+		defer closeRowsWrapper(t, rows)
+
+		// Get column type info.
+		colTypes, err := rows.ColumnTypes()
+		require.NoError(t, err)
+		require.Len(t, colTypes, 1)
+
+		// The database type name should be JSON.
+		require.Equal(t, "JSON", colTypes[0].DatabaseTypeName())
+	})
+
+	t.Run("JSONArray", func(t *testing.T) {
+		// Query a JSON array and verify the child type has JSON alias.
+		conn := openConnWrapper(t, db, context.Background())
+		defer closeConnWrapper(t, conn)
+
+		err := conn.Raw(func(driverConn any) error {
+			stmt, innerErr := driverConn.(*Conn).PrepareContext(context.Background(), `SELECT ['{"a":1}'::JSON, '{"b":2}'::JSON]`)
+			if innerErr != nil {
+				return innerErr
+			}
+			defer stmt.Close()
+
+			duckStmt := stmt.(*Stmt)
+			typeInfo, innerErr := duckStmt.ColumnTypeInfo(0)
+			require.NoError(t, innerErr)
+			require.Equal(t, TYPE_LIST, typeInfo.InternalType())
+
+			// The child type should have the JSON alias.
+			listDetails := typeInfo.Details().(*ListDetails)
+			require.Equal(t, "JSON", listDetails.Child.Alias())
+			require.Equal(t, TYPE_VARCHAR, listDetails.Child.InternalType())
+			return nil
+		})
+		require.NoError(t, err)
+	})
+}
+
+func TestTypeInfoAliasRoundtrip(t *testing.T) {
+	// Test that alias is preserved when converting TypeInfo -> LogicalType -> TypeInfo.
+	varcharInfo, err := NewTypeInfo(TYPE_VARCHAR)
+	require.NoError(t, err)
+
+	// Manually set an alias on the TypeInfo.
+	ti := varcharInfo.(*typeInfo)
+	ti.alias = "JSON"
+
+	// Convert to LogicalType.
+	lt := ti.logicalType()
+	defer mapping.DestroyLogicalType(&lt)
+
+	// Verify alias is set on the LogicalType.
+	require.Equal(t, "JSON", mapping.LogicalTypeGetAlias(lt))
+
+	// Convert back to TypeInfo.
+	reconstructedInfo, err := newTypeInfoFromLogicalType(lt)
+	require.NoError(t, err)
+
+	// Verify alias is preserved.
+	require.Equal(t, "JSON", reconstructedInfo.Alias())
+	require.Equal(t, TYPE_VARCHAR, reconstructedInfo.InternalType())
+}
+
+func TestTypeInfoAliasFromPreparedStatement(t *testing.T) {
+	db := openDbWrapper(t, "")
+	defer closeDbWrapper(t, db)
+
+	conn := openConnWrapper(t, db, context.Background())
+	defer closeConnWrapper(t, conn)
+
+	err := conn.Raw(func(driverConn any) error {
+		// Prepare a statement with JSON type in result column.
+		stmt, err := driverConn.(*Conn).PrepareContext(context.Background(), `SELECT '{"key":"value"}'::JSON AS json_col`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+
+		// Get the column type info.
+		duckStmt := stmt.(*Stmt)
+		typeInfo, err := duckStmt.ColumnTypeInfo(0)
+		require.NoError(t, err)
+		require.Equal(t, "JSON", typeInfo.Alias())
+		require.Equal(t, TYPE_VARCHAR, typeInfo.InternalType())
+
+		return nil
+	})
+	require.NoError(t, err)
 }
 
 func TestTypeInfoDetails(t *testing.T) {

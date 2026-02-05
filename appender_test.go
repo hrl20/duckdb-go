@@ -1063,6 +1063,49 @@ func TestAppenderWithJSON(t *testing.T) {
 	require.Equal(t, len(jsonInputs), i)
 }
 
+func TestAppenderJSONColumn(t *testing.T) {
+	c, db, conn, a := prepareAppender(t, `CREATE TABLE test (data JSON)`)
+	defer cleanupAppender(t, c, db, conn, a)
+
+	// Append JSON values as strings.
+	require.NoError(t, a.AppendRow(`{"key": "value1"}`))
+	require.NoError(t, a.AppendRow(`{"key": "value2", "nested": {"a": 1}}`))
+	require.NoError(t, a.AppendRow(`[1, 2, 3]`))
+	require.NoError(t, a.AppendRow(nil))
+	require.NoError(t, a.Flush())
+
+	// Verify the data was stored.
+	var count int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM test`).Scan(&count))
+	require.Equal(t, 4, count)
+
+	// Verify JSON can be read back (as VARCHAR).
+	var data string
+	require.NoError(t, db.QueryRow(`SELECT data::VARCHAR FROM test WHERE data IS NOT NULL LIMIT 1`).Scan(&data))
+	require.Contains(t, data, "key")
+}
+
+func TestAppenderJSONArrayColumn(t *testing.T) {
+	c, db, conn, a := prepareAppender(t, `CREATE TABLE test (data JSON[])`)
+	defer cleanupAppender(t, c, db, conn, a)
+
+	// Append JSON array values.
+	require.NoError(t, a.AppendRow([]string{`{"a": 1}`, `{"b": 2}`}))
+	require.NoError(t, a.AppendRow([]string{`[1, 2]`}))
+	require.NoError(t, a.AppendRow(nil))
+	require.NoError(t, a.Flush())
+
+	// Verify the count of rows inserted.
+	var count int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM test`).Scan(&count))
+	require.Equal(t, 3, count)
+
+	// Verify array length of first row.
+	var arrLen int
+	require.NoError(t, db.QueryRow(`SELECT array_length(data) FROM test LIMIT 1`).Scan(&arrLen))
+	require.Equal(t, 2, arrLen)
+}
+
 func TestAppenderUnion(t *testing.T) {
 	c, db, conn, a := prepareAppender(t, `
     CREATE TABLE test (
